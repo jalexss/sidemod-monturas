@@ -1,38 +1,49 @@
 {
 	"schemaVersion": 1,
-	"id": "modid",
+	"id": "cobble_mounts",
 	"version": "${version}",
-	"name": "Example Mod",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"name": "Cobblemon Custom Mounts",
+	"description": "Sidemod of cobblemon to assign pokemons in PC for be used as mounts in the world",
 	"authors": [
-		"Me!"
+		"Soleysus"
 	],
 	"contact": {
 		"homepage": "https://fabricmc.net/",
 		"sources": "https://github.com/FabricMC/fabric-example-mod"
 	},
 	"license": "CC0-1.0",
-	"icon": "assets/modid/icon.png",
+	"icon": "assets/cobble_mounts/icon.png",
 	"environment": "*",
 	"entrypoints": {
 		"main": [
-			"com.example.ExampleMod"
+			"com.soleysus.cobblemounts.CobbleMounts"
 		],
 		"client": [
-			"com.example.client.ExampleModClient"
+			"com.soleysus.cobblemounts.client.CobbleMountsClient"
 		]
 	},
 	"mixins": [
-		"modid.mixins.json",
+		"cobble_mounts.mixins.json",
 		{
-			"config": "modid.client.mixins.json",
+			"config": "cobble_mounts.client.mixins.json",
 			"environment": "client"
 		}
 	],
 	"depends": {
-		"fabricloader": ">=0.19.3",
+		"fabricloader": ">=0.17.2",
 		"minecraft": "~1.21.1",
 		"java": ">=21",
-		"fabric-api": "*"
+		"fabric-api": "*",
+		"fabric-language-kotlin": "*",
+		"cobblemon": ">=1.7.3 <1.8.0"
+	},
+	"suggests": {
+		"waystones": "*"
+	},
+	"custom": {
+		"cobble_mounts": {
+			"teleport_requires": "waystones",
+			"teleport_species": ["abra", "kadabra", "alakazam", "ralts", "kirlia", "gardevoir", "gallade"]
+		}
 	}
 }

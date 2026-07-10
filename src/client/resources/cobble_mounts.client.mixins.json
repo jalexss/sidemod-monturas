@@ -1,0 +1,12 @@
+{
+	"required": true,
+	"package": "com.soleysus.cobblemounts.client.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"client": [
+		"CobbleMountsClientMixin",
+		"StorageSlotMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

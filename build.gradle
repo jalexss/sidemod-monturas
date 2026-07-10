@@ -1,38 +1,71 @@
 plugins {
-	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+	id 'java'
+	id 'dev.architectury.loom' version '1.11-SNAPSHOT'
+	id 'architectury-plugin' version '3.4-SNAPSHOT'
+	id 'org.jetbrains.kotlin.jvm' version '2.2.20'
 	id 'maven-publish'
 }
 
 version = project.mod_version
 group = project.maven_group
 
-repositories {
-	// Add repositories to retrieve artifacts from in here.
-	// You should only use this when depending on other mods because
-	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
-	// for more information about repositories.
+base {
+	archivesName = project.archives_base_name
+}
+
+architectury {
+	platformSetupLoomIde()
+	fabric()
 }
 
 loom {
+	silentMojangMappingsLicense()
 	splitEnvironmentSourceSets()
 
 	mods {
-		"modid" {
+		"cobble_mounts" {
 			sourceSet sourceSets.main
 			sourceSet sourceSets.client
 		}
 	}
+
+	mixin {
+		defaultRefmapName = "mixins.${project.archives_base_name}.refmap.json"
+	}
+}
+
+repositories {
+	// Official Cobblemon artefacts (same as Cobblemon MDK)
+	maven {
+		name = "Cobblemon"
+		url = "https://artefacts.cobblemon.com/releases/"
+	}
+	mavenCentral()
 }
 
 dependencies {
-	// To change the versions see the gradle.properties file
+	// Minecraft / Fabric — aligned with Cobblemon Fabric Java MDK
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	mappings loom.officialMojangMappings()
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
-	// Fabric API. This is technically optional, but you probably want it anyway.
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	// Runtime full Fabric API; compile only the modules we need (MDK style)
+	modRuntimeOnly "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	modImplementation fabricApi.module("fabric-command-api-v2", project.fabric_api_version)
+	modImplementation fabricApi.module("fabric-lifecycle-events-v1", project.fabric_api_version)
+	modImplementation fabricApi.module("fabric-key-binding-api-v1", project.fabric_api_version)
+	modImplementation fabricApi.module("fabric-networking-api-v1", project.fabric_api_version)
+
+	// Must match Cobblemon 1.7.3's Kotlin stack (also enables Kotlin metadata remapping)
+	modImplementation "net.fabricmc:fabric-language-kotlin:${project.fabric_kotlin_version}"
+
+	// Official Cobblemon Maven coords (same as Cobblemon MDK).
+	// NEVER use files("libs/Cobblemon-....jar") in dev: that leaves intermediary
+	// names (class_2960) inside Kotlin metadata and crashes the client.
+	modCompileOnly("com.cobblemon:mod:${project.cobblemon_version}") {
+		transitive = false
+	}
+	modImplementation "com.cobblemon:fabric:${project.cobblemon_version}"
 }
 
 processResources {
@@ -48,10 +81,11 @@ tasks.withType(JavaCompile).configureEach {
 	it.options.release = 21
 }
 
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+	it.compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+}
+
 java {
-	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-	// if it is present.
-	// If you remove this line, sources will not be generated.
 	withSourcesJar()
 
 	sourceCompatibility = JavaVersion.VERSION_21
@@ -59,15 +93,14 @@ java {
 }
 
 jar {
-	def projectName = project.name
+	def projectName = project.base.archivesName.get()
 	inputs.property "projectName", projectName
 
 	from("LICENSE") {
-		rename { "${it}_$projectName"}
+		rename { "${it}_${projectName}" }
 	}
 }
 
-// configure the maven publication
 publishing {
 	publications {
 		create("mavenJava", MavenPublication) {
@@ -75,11 +108,6 @@ publishing {
 		}
 	}
 
-	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
 	repositories {
-		// Add repositories to publish to here.
-		// Notice: This block does NOT have the same function as the block in the top level.
-		// The repositories here will be used for publishing your artifact, not for
-		// retrieving dependencies.
 	}
 }

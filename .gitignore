@@ -1,40 +1,27 @@
-# gradle
-
+# Gradle
 .gradle/
 build/
-out/
-classes/
 
-# eclipse
-
-*.launch
-
-# idea
-
+# IDE (IntelliJ)
 .idea/
 *.iml
 *.ipr
 *.iws
+out/
 
-# vscode
-
-.settings/
-.vscode/
-bin/
-.classpath
-.project
-
-# macos
-
-*.DS_Store
-
-# fabric
-
+# Entorno de pruebas de Minecraft
 run/
+logs/
+crash-reports/
 
-# java
+# Archivos compilados sueltos
+*.class
+*.jar
 
-hs_err_*.log
-replay_*.log
-*.hprof
-*.jfr
+# Dependencias locales de mods (no subir a GitHub; >100MB y no se versionan)
+libs/
+!libs/.gitkeep
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
