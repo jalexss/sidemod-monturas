@@ -9,7 +9,7 @@ build/
 *.iws
 out/
 
-# Entorno de pruebas de Minecraft
+# Entorno de pruebas de Minecraft (mundos, logs, playerdata, configs locales)
 run/
 logs/
 crash-reports/
@@ -17,10 +17,23 @@ crash-reports/
 # Archivos compilados sueltos
 *.class
 *.jar
+# Keep the Gradle wrapper jar
+!gradle/wrapper/gradle-wrapper.jar
 
 # Dependencias locales de mods (no subir a GitHub; >100MB y no se versionan)
 libs/
 !libs/.gitkeep
+
+# Secrets / machine-local overrides (never commit)
+.env
+.env.*
+*.pem
+*.key
+*.jks
+*.p12
+credentials*
+local.properties
+secrets/
 
 # Sistema operativo
 .DS_Store

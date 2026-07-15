@@ -8,8 +8,9 @@
 		"Soleysus"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"homepage": "https://github.com/jalexss/sidemod-monturas",
+		"sources": "https://github.com/jalexss/sidemod-monturas",
+		"issues": "https://github.com/jalexss/sidemod-monturas/issues"
 	},
 	"license": "CC0-1.0",
 	"icon": "assets/cobble_mounts/icon.png",
