@@ -23,14 +23,23 @@ public class CobbleMounts implements ModInitializer {
 				MountCommands.register(dispatcher));
 		// Delayed mount retries + recall Pokémon when the player dismounts
 		ServerTickEvents.END_SERVER_TICK.register(MountService::tickActiveMounts);
-		// Sync assigned mount UUIDs so PC slots show as locked without opening the menu
+		// Recover soft-refs + migrate legacy bank mons + sync locked PC slots
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
 				server.execute(() -> {
 					try {
-						MountService.syncTo(handler.player);
+						MountService.onPlayerJoin(handler.player);
 					} catch (Exception ex) {
-						LOGGER.warn("Failed to sync mounts on join for {}", handler.player.getGameProfile().getName(), ex);
+						LOGGER.warn("Failed to init mounts on join for {}", handler.player.getGameProfile().getName(), ex);
 					}
 				}));
+		// Force-recall active mounts and dual-persist soft-refs before the player is gone
+		ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+			try {
+				MountService.onPlayerDisconnect(handler.player);
+			} catch (Exception ex) {
+				LOGGER.warn("Failed to cleanup mounts on disconnect for {}",
+						handler.player.getGameProfile().getName(), ex);
+			}
+		});
 	}
 }

@@ -11,6 +11,7 @@ import com.soleysus.cobblemounts.CobbleMounts;
 import com.soleysus.cobblemounts.MountStyle;
 import com.soleysus.cobblemounts.network.MountNetworking;
 import com.soleysus.cobblemounts.network.payload.MountSyncPayload;
+import com.soleysus.cobblemounts.storage.MountAssignmentWorldData;
 import com.soleysus.cobblemounts.storage.MountBankStore;
 import com.soleysus.cobblemounts.storage.MountStores;
 import java.util.ArrayList;
@@ -26,6 +27,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import kotlin.Unit;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.MinecraftServer;
@@ -38,10 +40,11 @@ import org.jetbrains.annotations.Nullable;
  * Server-side mount assignment / summon logic.
  * <p>
  * Assigned Pokémon stay in the PC (soft UUID references). Party mons are never candidates.
+ * Soft-refs are dual-written to Cobblemon's custom store <em>and</em> player NBT so they
+ * survive multiplayer disconnect/rejoin even if a store dirty-flag is missed.
  */
 public final class MountService {
 	public static final String MOUNT_TAG = "cobble_mounts:active_mount";
-
 	private static final Map<UUID, UUID> ACTIVE_MOUNT_ENTITIES = new ConcurrentHashMap<>();
 	private static final Map<UUID, Boolean> MOUNT_WAS_RIDING = new ConcurrentHashMap<>();
 	/** player → pokemon UUID that had mega form applied for the active mount */
@@ -165,6 +168,7 @@ public final class MountService {
 		// Legacy: if mon was sitting in bank, migrate back to PC while keeping soft-ref
 		migrateBankMonToPcIfNeeded(player, bank, pokemon);
 
+		persistAssignments(player, bank);
 		syncTo(player);
 
 		Component placeText = joinComponents(placements);
@@ -206,6 +210,7 @@ public final class MountService {
 		if (pokemon != null && !bank.isReferenced(id) && bank.getByUuid(id) != null) {
 			maybeReturnToPc(player, bank, id);
 		}
+		persistAssignments(player, bank);
 		syncTo(player);
 		if (pokemon != null) {
 			return Result.okKey("message.cobble_mounts.unassigned", displayNameComponent(pokemon));
@@ -239,6 +244,7 @@ public final class MountService {
 			return Result.failKey("message.cobble_mounts.no_mega_stone");
 		}
 		bank.setMegaEnabled(style, slot, enabled);
+		persistAssignments(player, bank);
 		syncTo(player);
 		return Result.okKey(enabled
 						? "message.cobble_mounts.mega_enabled"
@@ -413,6 +419,181 @@ public final class MountService {
 	private static void clearTracking(UUID playerId) {
 		ACTIVE_MOUNT_ENTITIES.remove(playerId);
 		MOUNT_WAS_RIDING.remove(playerId);
+	}
+
+	/**
+	 * Dual-persist soft-refs:
+	 * <ol>
+	 *   <li>Cobblemon custom store (via {@link MountBankStore#markDirty()})</li>
+	 *   <li>Overworld {@link MountAssignmentWorldData} — always written to the world save</li>
+	 * </ol>
+	 * The world data is the hard guarantee for multiplayer rejoin.
+	 */
+	public static void persistAssignments(ServerPlayer player, MountBankStore bank) {
+		bank.markDirty();
+		writeAssignmentsToWorld(player, bank);
+	}
+
+	private static void writeAssignmentsToWorld(ServerPlayer player, MountBankStore bank) {
+		try {
+			MinecraftServer server = player.getServer();
+			if (server == null) {
+				return;
+			}
+			MountAssignmentWorldData.get(server).put(player.getUUID(), bank.writeSoftRefsNbt());
+		} catch (Exception ex) {
+			CobbleMounts.LOGGER.warn("Failed to write mount soft-refs to world data for {}",
+					player.getGameProfile().getName(), ex);
+		}
+	}
+
+	/**
+	 * Restores soft-refs from world SavedData into the bank when the custom store has none
+	 * (typical after the dirty-flag bug left the store file empty/missing).
+	 *
+	 * @return true if world data overwrote bank slots
+	 */
+	private static boolean restoreAssignmentsFromWorld(ServerPlayer player, MountBankStore bank) {
+		try {
+			MinecraftServer server = player.getServer();
+			if (server == null) {
+				return false;
+			}
+			CompoundTag tag = MountAssignmentWorldData.get(server).get(player.getUUID());
+			if (tag == null || tag.isEmpty()) {
+				return false;
+			}
+			// Prefer world backup when the bank has no assignments (lost Cobblemon store file).
+			if (bank.hasAnyAssignment()) {
+				return false;
+			}
+			bank.readSoftRefsNbt(tag);
+			if (bank.hasAnyAssignment()) {
+				bank.markDirty();
+				CobbleMounts.LOGGER.info("Restored mount soft-refs from world data for {} ({} uuids)",
+						player.getGameProfile().getName(), bank.allAssignedUuids().size());
+				return true;
+			}
+		} catch (Exception ex) {
+			CobbleMounts.LOGGER.warn("Failed to restore mount soft-refs from world data for {}",
+					player.getGameProfile().getName(), ex);
+		}
+		return false;
+	}
+
+	/**
+	 * Called on join: recover soft-refs, migrate legacy bank mons back to PC, sync client.
+	 * Never removes a Pokémon from the PC just because a soft-ref is missing.
+	 */
+	public static void onPlayerJoin(ServerPlayer player) {
+		MountBankStore bank = MountStores.get(player);
+		restoreAssignmentsFromWorld(player, bank);
+		// Move any legacy physical bank mons into the PC (keep soft UUID refs)
+		migrateAllBankMonsToPc(player, bank);
+		// Mirror current bank state into the world (and mark Cobblemon store dirty)
+		persistAssignments(player, bank);
+		syncTo(player);
+	}
+
+	/**
+	 * Critical multiplayer path: recall any active mount entity before the player entity
+	 * is removed, restore mega form, and force-persist soft-refs.
+	 * <p>
+	 * Without this, a sent-out PC mount can be left in the world with no owner and
+	 * Cobblemon may fail to keep it linked to the PC after rejoin.
+	 */
+	public static void onPlayerDisconnect(ServerPlayer player) {
+		try {
+			dismountAndForceRecallActive(player);
+		} catch (Exception ex) {
+			CobbleMounts.LOGGER.error("Failed to recall mounts on disconnect for {}",
+					player.getGameProfile().getName(), ex);
+		}
+		try {
+			MountBankStore bank = MountStores.get(player);
+			// Last-chance migration of legacy bank mons while player/PC are still available
+			migrateAllBankMonsToPc(player, bank);
+			persistAssignments(player, bank);
+		} catch (Exception ex) {
+			CobbleMounts.LOGGER.error("Failed to persist mounts on disconnect for {}",
+					player.getGameProfile().getName(), ex);
+		}
+	}
+
+	/**
+	 * Immediate (non-animated) recall — safe during logout when the connection is closing.
+	 */
+	private static void forceRecall(PokemonEntity entity, @Nullable Pokemon pokemon) {
+		try {
+			List<Entity> riders = new ArrayList<>(entity.getPassengers());
+			for (Entity rider : riders) {
+				rider.stopRiding();
+			}
+			Pokemon target = pokemon != null ? pokemon : entity.getPokemon();
+			if (target != null) {
+				// Instant recall keeps the mon in its store (PC/party/bank) with Inactive state.
+				target.recall();
+			} else if (!entity.isRemoved()) {
+				entity.discard();
+			}
+		} catch (Exception ex) {
+			CobbleMounts.LOGGER.warn("Force recall failed, discarding entity", ex);
+			try {
+				if (pokemon != null) {
+					pokemon.recall();
+				}
+			} catch (Exception ignored) {
+			}
+			if (!entity.isRemoved()) {
+				entity.discard();
+			}
+		}
+	}
+
+	private static void dismountAndForceRecallActive(ServerPlayer player) {
+		UUID entityId = ACTIVE_MOUNT_ENTITIES.remove(player.getUUID());
+		MOUNT_WAS_RIDING.remove(player.getUUID());
+
+		Entity vehicle = player.getVehicle();
+		if (vehicle instanceof PokemonEntity pe) {
+			player.stopRiding();
+			if (pe.getTags().contains(MOUNT_TAG) || isTrackedMountPokemon(player, pe.getPokemon())) {
+				forceRecall(pe, pe.getPokemon());
+			}
+			restoreMegaIfNeeded(player, pe.getPokemon());
+			return;
+		}
+		if (entityId != null) {
+			Entity found = player.serverLevel().getEntity(entityId);
+			if (found instanceof PokemonEntity pe) {
+				forceRecall(pe, pe.getPokemon());
+				restoreMegaIfNeeded(player, pe.getPokemon());
+				return;
+			}
+		}
+		// Safety: any remaining mount-tagged entity owned by this player nearby
+		recallOwnedMountEntities(player);
+		restoreMegaIfNeeded(player, null);
+	}
+
+	private static void recallOwnedMountEntities(ServerPlayer player) {
+		try {
+			for (Entity entity : player.serverLevel().getAllEntities()) {
+				if (!(entity instanceof PokemonEntity pe) || !pe.isAlive()) {
+					continue;
+				}
+				if (!pe.getTags().contains(MOUNT_TAG)) {
+					continue;
+				}
+				if (!player.getUUID().equals(pe.getOwnerUUID())) {
+					continue;
+				}
+				forceRecall(pe, pe.getPokemon());
+			}
+		} catch (Exception ex) {
+			CobbleMounts.LOGGER.warn("Scan for owned mount entities failed for {}",
+					player.getGameProfile().getName(), ex);
+		}
 	}
 
 	private static void restoreMegaIfNeeded(ServerPlayer player, @Nullable Pokemon pokemon) {
@@ -601,6 +782,8 @@ public final class MountService {
 			UUID entityId = entry.getValue();
 			ServerPlayer player = server.getPlayerList().getPlayer(playerId);
 			if (player == null) {
+				// Player already gone — disconnect handler should have force-recalled.
+				// Drop tracking only; do not invent world lookups without a level reference.
 				it.remove();
 				MOUNT_WAS_RIDING.remove(playerId);
 				ACTIVE_MEGA_RESTORE.remove(playerId);
@@ -723,8 +906,10 @@ public final class MountService {
 
 	public static void syncTo(ServerPlayer player) {
 		MountBankStore bank = MountStores.get(player);
-		// Opportunistic migration of legacy bank mons back to PC
+		// Opportunistic migration of legacy bank mons back to PC (never drop soft-refs)
 		migrateAllBankMonsToPc(player, bank);
+		// Keep world SavedData mirror current whenever the client is refreshed
+		writeAssignmentsToWorld(player, bank);
 
 		Map<MountStyle, List<MountSyncPayload.SlotInfo>> map = new EnumMap<>(MountStyle.class);
 		Set<UUID> assigned = bank.allAssignedUuids();
@@ -852,21 +1037,45 @@ public final class MountService {
 	}
 
 	private static void migrateBankMonToPcIfNeeded(ServerPlayer player, MountBankStore bank, Pokemon pokemon) {
-		if (bank.getByUuid(pokemon.getUuid()) == null) {
+		UUID id = pokemon.getUuid();
+		Pokemon bankMon = bank.getByUuid(id);
+		if (bankMon == null) {
 			return;
 		}
-		if (pokemon.getEntity() != null) {
-			safeRecall(pokemon.getEntity(), pokemon);
+		// Always recall first so state is Inactive before store moves
+		if (bankMon.getEntity() != null) {
+			forceRecall(bankMon.getEntity(), bankMon);
+		} else if (pokemon.getEntity() != null) {
+			forceRecall(pokemon.getEntity(), pokemon);
 		}
-		if (!bank.remove(pokemon)) {
-			return;
-		}
+
 		PCStore pc = PlayerExtensionsKt.pc(player);
-		if (!pc.add(pokemon)) {
-			bank.add(pokemon);
-			chat(player, Component.translatable("message.cobble_mounts.pc_full_return",
-					displayNameComponent(pokemon)));
+		// Soft-ref world: PC already has this UUID — drop the legacy bank duplicate only.
+		if (pc.get(id) != null) {
+			if (!bank.remove(bankMon)) {
+				// Try by UUID via remove(Pokemon) failure — leave in place rather than risk loss
+				CobbleMounts.LOGGER.warn("Could not remove duplicate bank mon {} for {}",
+						id, player.getGameProfile().getName());
+			} else {
+				bank.markDirty();
+			}
+			return;
 		}
+
+		if (!bank.remove(bankMon)) {
+			return;
+		}
+		if (!pc.add(bankMon)) {
+			// PC full — keep mon safe in the bank rather than discard
+			bank.add(bankMon);
+			bank.markDirty();
+			chat(player, Component.translatable("message.cobble_mounts.pc_full_return",
+					displayNameComponent(bankMon)));
+			return;
+		}
+		bank.markDirty();
+		CobbleMounts.LOGGER.info("Migrated legacy mount-bank mon {} ({}) back to PC for {}",
+				bankMon.getSpecies().getName(), id, player.getGameProfile().getName());
 	}
 
 	private static void migrateAllBankMonsToPc(ServerPlayer player, MountBankStore bank) {
@@ -885,17 +1094,23 @@ public final class MountService {
 			return false;
 		}
 		if (pokemon.getEntity() != null) {
-			safeRecall(pokemon.getEntity(), pokemon);
+			forceRecall(pokemon.getEntity(), pokemon);
+		}
+		PCStore pc = PlayerExtensionsKt.pc(player);
+		if (pc.get(pokemonId) != null) {
+			// Already in PC — only free the bank slot
+			return bank.remove(pokemon);
 		}
 		if (!bank.remove(pokemon)) {
 			return false;
 		}
-		PCStore pc = PlayerExtensionsKt.pc(player);
 		if (!pc.add(pokemon)) {
 			bank.add(pokemon);
+			bank.markDirty();
 			chat(player, Component.translatable("message.cobble_mounts.pc_full_bank"));
 			return false;
 		}
+		bank.markDirty();
 		return true;
 	}
 

@@ -1,5 +1,6 @@
 package com.soleysus.cobblemounts.storage;
 
+import com.cobblemon.mod.common.api.reactive.SimpleObservable;
 import com.cobblemon.mod.common.api.storage.party.PartyStore;
 import com.cobblemon.mod.common.api.storage.party.PlayerPartyStore;
 import com.cobblemon.mod.common.pokemon.Pokemon;
@@ -14,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import kotlin.Unit;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -213,11 +215,71 @@ public class MountBankStore extends PlayerPartyStore {
 		return out;
 	}
 
+	/**
+	 * Marks this custom store dirty so Cobblemon's FileBacked factory flushes it to disk.
+	 * <p>
+	 * Soft-ref banks often hold <em>no</em> physical Pokémon (mons stay in the PC).
+	 * The previous implementation only called {@link #onPokemonChanged} when a mon was
+	 * present, so UUID slot changes were never saved — on multiplayer rejoin the mount
+	 * list appeared empty (and legacy bank-only mons could be lost with the unsaved store).
+	 */
 	private void touch() {
+		// Prefer Cobblemon's normal path when a mon is still physically in the bank (legacy).
 		for (Pokemon p : this) {
 			onPokemonChanged(p);
 			return;
 		}
+		// Soft-ref only: PartyStore exposes two getAnyChangeObservable overloads (Kotlin),
+		// so Java cannot call it unambiguously — reach the SimpleObservable field directly.
+		emitDirtyViaReflection();
+	}
+
+	@SuppressWarnings("unchecked")
+	private void emitDirtyViaReflection() {
+		try {
+			java.lang.reflect.Field field = PartyStore.class.getDeclaredField("anyChangeObservable");
+			field.setAccessible(true);
+			SimpleObservable<Unit> obs = (SimpleObservable<Unit>) field.get(this);
+			obs.emit(Unit.INSTANCE);
+		} catch (ReflectiveOperationException ex) {
+			// World SavedData dual-write is the hard guarantee; this is best-effort for Cobblemon files.
+			com.soleysus.cobblemounts.CobbleMounts.LOGGER.error(
+					"Unable to mark MountBankStore dirty via anyChangeObservable", ex);
+		}
+	}
+
+	/** Public hook so disconnect/join can force a pending save of soft UUID refs. */
+	public void markDirty() {
+		touch();
+	}
+
+	/**
+	 * Writes soft-ref slots + mega flags into a standalone NBT compound (no Pokémon payloads).
+	 * Used for dual persistence on the player ({@code player.dat}) so refs survive even if
+	 * the Cobblemon custom-store dirty flag is missed on logout.
+	 */
+	public CompoundTag writeSoftRefsNbt() {
+		CompoundTag tag = new CompoundTag();
+		tag.put(KEY_SLOTS, writeStyleSlotsNbt());
+		tag.put(KEY_MEGA, writeMegaFlagsNbt());
+		return tag;
+	}
+
+	/**
+	 * Loads soft-ref slots from NBT previously written by {@link #writeSoftRefsNbt()}.
+	 * Does not clear or move any physical Pokémon still in this bank.
+	 */
+	public void readSoftRefsNbt(CompoundTag tag) {
+		if (tag == null || tag.isEmpty()) {
+			return;
+		}
+		readStyleSlotsNbt(tag);
+		readMegaFlagsNbt(tag);
+	}
+
+	/** True if any style slot currently holds a UUID. */
+	public boolean hasAnyAssignment() {
+		return !allAssignedUuids().isEmpty();
 	}
 
 	@Override
